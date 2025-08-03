@@ -61,7 +61,23 @@ def process_article(docid, title, text, chunk_size=512):
     print(f"{'='*60}")
 
     # Parse MediaWiki markup and strip formatting
-    parsed_text = mwparserfromhell.parse(text).strip_code().strip()
+    parsed_code = mwparserfromhell.parse(text)
+    parsed_text = parsed_code.strip_code().strip()
+    templates = parsed_code.filter_templates()
+    for template in templates:
+        if template.name.startswith("Infobox"):
+            infobox_data = {}
+            # Extract parameters from the infobox
+            for param in template.params:
+                param_name = param.name.strip()
+                param_value = param.value.strip()
+                # Remove wikitext markup for cleaner output (optional)
+                param_value = mwparserfromhell.parse(param_value).strip_code()
+                infobox_data[param_name] = param_value
+
+            # Print the parsed data
+            for key, value in infobox_data.items():
+                print(f"{key}: {value}")
 
     # Generate chunks
     text_chunks = chunk_text(parsed_text, chunk_size)
