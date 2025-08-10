@@ -9,6 +9,7 @@ import mwparserfromhell
 from tqdm import tqdm
 import time
 import duckdb
+from pathlib import Path
 
 
 def chunk_text(text, max_bytes):
@@ -51,6 +52,62 @@ def chunk_text(text, max_bytes):
         chunks.append(current_chunk.strip())
 
     return chunks
+
+
+def extract_infobox(docid, title, text, input_filename):
+    """Extract infobox data from a single article and store in DuckDB table"""
+    # Create DuckDB filename based on input parquet filename
+    input_path = Path(input_filename)
+    db_filename = f"{input_path.stem}_infobox.duckdb"
+
+    # Create DuckDB connection and table
+    conn = duckdb.connect(str(db_filename))
+
+    # Create table for storing infobox data
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS infobox_data (
+            docid INTEGER,
+            key VARCHAR,
+            value VARCHAR
+        )
+    """
+    )
+
+    # Parse MediaWiki markup and strip formatting
+    parsed_code = mwparserfromhell.parse(text)
+    parsed_text = parsed_code.strip_code().strip()
+    templates = parsed_code.filter_templates()
+
+    for template in templates:
+        if template.name.startswith("Infobox"):
+            # Extract parameters from the infobox
+            for param in template.params:
+                param_name = param.name.strip()
+                param_value = param.value.strip()
+                # Remove wikitext markup for cleaner output (optional)
+                param_value = mwparserfromhell.parse(param_value).strip_code()
+
+                # Insert into DuckDB table
+                conn.execute(
+                    """
+                    INSERT INTO infobox_data (docid, key, value)
+                    VALUES (?, ?, ?)
+                """,
+                    [docid, param_name, param_value],
+                )
+
+    # Query and display the stored data
+    result = conn.execute(
+        """
+        SELECT key, value FROM infobox_data
+        WHERE docid = ?
+        ORDER BY key
+    """,
+        [docid],
+    ).fetchall()
+
+    conn.close()
 
 
 def process_article(docid, title, text, chunk_size=512):
@@ -133,8 +190,13 @@ def main():
     parser.add_argument(
         "--docid",
         type=int,
-        required=True,
+        default=0,
         help="Process only the article with this specific document ID",
+    )
+    parser.add_argument(
+        "--extract-infobox",
+        action="store_true",
+        help="Extract infobox data from the article",
     )
 
     args = parser.parse_args()
@@ -149,29 +211,36 @@ def main():
         conn = duckdb.connect()
 
         # Query for the specific document ID, excluding redirects
+        filter = f"page_id = '{args.docid}' AND" if args.docid else ""
         query = f"""
-            SELECT page_id, title, text 
-            FROM read_parquet('{args.input}') 
-            WHERE page_id = {args.docid} 
-            AND NOT starts_with(text, '#REDIRECT')
+            SELECT page_id, title, text
+            FROM read_parquet('{args.input}')
+            WHERE
+            {filter}
+            NOT starts_with(text, '#REDIRECT')
         """
 
-        result = conn.execute(query).fetchall()
+        result = conn.execute(query).df()
 
-        if not result:
+        if result.empty:
             print(
                 f"No article found with document ID {args.docid} (or it's a redirect page)"
             )
             return
 
         # Process the found article
-        for row in result:
-            docid, title, text = row
+        for index, row in result.iterrows():
+            docid = row["page_id"]
+            title = row["title"]
+            text = row["text"]
             print(f"Found article: {title}")
 
             # Process the article
-            chunks = process_article(docid, title, text, args.chunk_size)
-            print(f"Successfully processed document ID {args.docid}")
+            if args.extract_infobox:
+                extract_infobox(docid, title, text, args.input)
+            else:
+                chunks = process_article(docid, title, text, args.chunk_size)
+            print(f"Successfully processed document ID {docid}")
 
         conn.close()
 
