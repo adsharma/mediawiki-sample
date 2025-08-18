@@ -12,6 +12,63 @@ import duckdb
 from pathlib import Path
 
 
+def extract_links(docid, title, text, page_meta_db, input_filename):
+    """Extract links from a single article and store link graph in DuckDB table"""
+    # Create DuckDB filename for link graph
+    input_path = Path(input_filename)
+    db_filename = f"{input_path.stem}_linkgraph.duckdb"
+
+    # Connect to page_meta.duckdb for docid lookup
+    meta_conn = duckdb.connect(page_meta_db)
+    # Connect to link graph DB
+    link_conn = duckdb.connect(str(db_filename))
+
+    # Create table for storing links
+    link_conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS links (
+            source INTEGER,
+            target INTEGER
+        )
+        """
+    )
+
+    # Parse MediaWiki markup
+    parsed_code = mwparserfromhell.parse(text)
+    wikilinks = parsed_code.filter_wikilinks()
+    targets = set()
+    for link in wikilinks:
+        target_title = str(link.title).strip()
+        if not target_title:
+            continue
+        # Lookup docid for target_title
+        try:
+            res = meta_conn.execute(
+                """
+                SELECT docid FROM page_meta WHERE title = ?
+                """,
+                [target_title],
+            ).fetchone()
+            if res:
+                target_docid = res[0]
+                targets.add(target_docid)
+        except Exception:
+            continue
+
+    # Insert links into link graph DB
+    for target_docid in targets:
+        link_conn.execute(
+            """
+            INSERT INTO links (source, target) VALUES (?, ?)
+            """,
+            [docid, target_docid],
+        )
+
+    print(f"Extracted {len(targets)} links from '{title}' (docid={docid})")
+    meta_conn.close()
+    link_conn.close()
+
+
 def chunk_text(text, max_bytes):
     """Break text into chunks of maximum max_bytes size"""
     chunks = []
@@ -199,6 +256,19 @@ def main():
         help="Extract infobox data from the article",
     )
 
+    parser.add_argument(
+        "--extract-link-graph",
+        action="store_true",
+        help="Extract link graph from the article and store as docids in DuckDB",
+    )
+
+    parser.add_argument(
+        "--page-meta-db",
+        type=str,
+        default="page_meta.duckdb",
+        help="DuckDB file containing page_meta table for docid lookup (default: page_meta.duckdb)",
+    )
+
     args = parser.parse_args()
 
     print(f"Input parquet file: {args.input}")
@@ -236,10 +306,14 @@ def main():
             print(f"Found article: {title}")
 
             # Process the article
+
             if args.extract_infobox:
                 extract_infobox(docid, title, text, args.input)
+            elif args.extract_link_graph:
+                extract_links(docid, title, text, args.page_meta_db, args.input)
             else:
                 chunks = process_article(docid, title, text, args.chunk_size)
+
             print(f"Successfully processed document ID {docid}")
 
         conn.close()

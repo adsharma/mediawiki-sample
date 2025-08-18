@@ -11,11 +11,15 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 def run_chunk_extractor(
-    input_file: str, extract_infobox: bool = False, output_dir: str = None
+    input_file: str,
+    extract_infobox: bool = False,
+    extract_link_graph: bool = False,
+    page_meta_db: Optional[str] = None,
+    output_dir: Optional[str] = None,
 ) -> Tuple[str, bool, str]:
     """
     Run chunk_extractor.py on a single parquet file.
@@ -33,21 +37,23 @@ def run_chunk_extractor(
 
         if extract_infobox:
             cmd.append("--extract-infobox")
+        if extract_link_graph:
+            cmd.append("--extract-link-graph")
+            if page_meta_db is not None:
+                cmd.extend(["--page-meta-db", page_meta_db])
 
         # Set working directory - use output_dir if specified, otherwise script directory
-        if output_dir and extract_infobox:
+        if output_dir and (extract_infobox or extract_link_graph):
             working_dir = output_dir
-            # Ensure output directory exists
             os.makedirs(working_dir, exist_ok=True)
         else:
             working_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Run the command
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=3000,  # 50 minute timeout per file
+            timeout=3000,
             cwd=working_dir,
         )
 
@@ -126,6 +132,17 @@ def main():
         help="Extract infobox data from articles",
     )
     parser.add_argument(
+        "--extract-link-graph",
+        action="store_true",
+        help="Extract link graph from articles and store as docids in DuckDB",
+    )
+    parser.add_argument(
+        "--page-meta-db",
+        type=str,
+        default=None,
+        help="DuckDB file containing page_meta table for docid lookup",
+    )
+    parser.add_argument(
         "--max-files", type=int, help="Maximum number of files to process (for testing)"
     )
     parser.add_argument(
@@ -173,12 +190,16 @@ def main():
         print(f"Found {len(all_files)} parquet files to process")
         print(f"Parallelism: {args.parallelism}")
         print(f"Extract infobox: {args.extract_infobox}")
+        print(f"Extract link graph: {args.extract_link_graph}")
 
         # Show output information
-        if args.extract_infobox:
+        if args.extract_infobox or args.extract_link_graph:
             output_dir = args.output_dir if args.output_dir else os.getcwd()
             print(f"DuckDB files will be written to: {output_dir}")
-            print(f"DuckDB filename pattern: <parquet_filename>_infobox.duckdb")
+            if args.extract_infobox:
+                print(f"DuckDB filename pattern: <parquet_filename>_infobox.duckdb")
+            if args.extract_link_graph:
+                print(f"DuckDB filename pattern: <parquet_filename>_linkgraph.duckdb")
 
         if args.dry_run:
             print("\nDry run - files that would be processed:")
@@ -205,12 +226,13 @@ def main():
         print("=" * 80)
 
         with ProcessPoolExecutor(max_workers=args.parallelism) as executor:
-            # Submit all jobs
             future_to_file = {
                 executor.submit(
                     run_chunk_extractor,
                     file_path,
                     args.extract_infobox,
+                    args.extract_link_graph,
+                    args.page_meta_db,
                     args.output_dir,
                 ): file_path
                 for file_path in all_files
